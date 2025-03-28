@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Q-learning GridWorld</title>
+    <style>
+        .grid-container {
+            display: grid;
+            margin: 10px 0;
+            grid-template-columns: repeat(AUTO_FILL, 40px);
+            grid-gap: 5px;
+        }
+        .grid-item {
+            width: 40px;
+            height: 40px;
+            border: 1px solid #000;
+            text-align: center;
+            line-height: 40px;
+            cursor: pointer;
+            font-size: 14px;
+            position: relative;
+        }
+        .grid-item.blocked {
+            background-color: grey;
+            cursor: default;
+        }
+        .grid-item.start {
+            background-color: lightgreen;
+            cursor: default;
+        }
+        .grid-item.goal {
+            background-color: salmon;
+            cursor: default;
+        }
+        .highlight {
+            animation: highlight 0.5s forwards;
+        }
+        @keyframes highlight {
+            0%   { background-color: yellow; }
+            100% { background-color: yellow; }
+        }
+
+        /* 表格的樣式，可根據需要自行調整 */
+        table {
+            border-collapse: collapse;
+            margin-top: 20px;
+            margin-bottom: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ccc;
+        }
+        th, td {
+            width: 60px;
+            height: 60px;
+            text-align: center;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+<body>
+    <h1>Q-learning GridWorld</h1>
+    <form id="sizeForm">
+        <label for="gridSize">請輸入網格大小(3~10)：</label>
+        <input type="number" id="gridSize" name="gridSize" min="3" max="10" value="5">
+        <button type="button" onclick="generateGrid()">生成網格</button>
+        <button type="button" onclick="resetAll()">Reset</button>
+    </form>
+
+    <!-- 主網格顯示區 -->
+    <div id="gridContainer" class="grid-container"></div>
+
+    <form id="trainForm">
+        <input type="hidden" id="gridData" name="gridData">
+        <button type="button" onclick="startQLearning()">開始 Q Learning</button>
+    </form>
+
+    <!-- 顯示最佳策略與 Q-value 的區塊（分成兩個表格） -->
+    <div id="resultContainer"></div>
+
+<script>
+    let gridSize = 5;   // 預設 5
+    let clickCount = 0; // 用來判定第幾次點擊
+    let startPos = null;
+    let goalPos = null;
+    let obstaclePositions = [];
+
+    // 動態生成網格
+    function generateGrid() {
+        // 重新初始化
+        clickCount = 0;
+        startPos = null;
+        goalPos = null;
+        obstaclePositions = [];
+
+        const sizeInput = document.getElementById('gridSize').value;
+        gridSize = parseInt(sizeInput) || 5;
+        if (gridSize < 3) gridSize = 3;
+        if (gridSize > 10) gridSize = 10;
+
+        const container = document.getElementById('gridContainer');
+        container.innerHTML = ''; // 先清空舊的
+
+        // 設定 CSS Grid 的欄數
+        container.style.gridTemplateColumns = `repeat(${gridSize}, 40px)`;
+
+        let index = 1;
+        for (let r = 0; r < gridSize; r++) {
+            for (let c = 0; c < gridSize; c++) {
+                const cell = document.createElement('div');
+                cell.classList.add('grid-item');
+                cell.innerText = index;  // 顯示編號
+                cell.dataset.index = index;
+                cell.dataset.row = r;
+                cell.dataset.col = c;
+                cell.addEventListener('click', onCellClick);
+                container.appendChild(cell);
+                index++;
+            }
+        }
+
+        // 生成網格後，也順便清空結果區
+        document.getElementById('resultContainer').innerHTML = '';
+    }
+
+    // Reset: 完全清除並恢復初始狀態
+    function resetAll() {
+        clickCount = 0;
+        startPos = null;
+        goalPos = null;
+        obstaclePositions = [];
+        // 清空網格容器
+        document.getElementById('gridContainer').innerHTML = '';
+        // 清空結果顯示
+        document.getElementById('resultContainer').innerHTML = '';
+        // 預設將輸入欄設回5
+        document.getElementById('gridSize').value = '5';
+    }
+
+    // 網格點擊事件
+    function onCellClick(e) {
+        const cell = e.target;
+        // 如果已經被標記過，不允許再改
+        if (cell.classList.contains('blocked') ||
+            cell.classList.contains('start') ||
+            cell.classList.contains('goal')) {
+            return;
+        }
+
+        // 第一次點擊 -> 綠色 (起點)
+        if (clickCount === 0) {
+            cell.classList.add('start');
+            startPos = {
+                index: cell.dataset.index,
+                row: parseInt(cell.dataset.row),
+                col: parseInt(cell.dataset.col)
+            };
+            clickCount++;
+        }
+        // 第二次點擊 -> 紅色 (終點)
+        else if (clickCount === 1) {
+            cell.classList.add('goal');
+            goalPos = {
+                index: cell.dataset.index,
+                row: parseInt(cell.dataset.row),
+                col: parseInt(cell.dataset.col)
+            };
+            clickCount++;
+        }
+        // 後續 -> 灰色 (障礙物)，最多 (gridSize - 2) 個
+        else {
+            if (obstaclePositions.length < (gridSize - 2)) {
+                cell.classList.add('blocked');
+                obstaclePositions.push({
+                    index: cell.dataset.index,
+                    row: parseInt(cell.dataset.row),
+                    col: parseInt(cell.dataset.col)
+                });
+                clickCount++;
+            } else {
+                alert(`障礙物最多只能設定 ${gridSize - 2} 個！`);
+            }
+        }
+    }
+
+    // 清除網格中的高亮（如果使用者多次按下 Q Learning，先移除前一次的highlight）
+    function clearHighlight() {
+        const gridContainer = document.getElementById('gridContainer');
+        const cells = gridContainer.querySelectorAll('.grid-item');
+        cells.forEach(cell => {
+            cell.classList.remove('highlight');
+        });
+    }
+
+    // 發送資料給後端，執行 Q-Learning
+    function startQLearning() {
+        if (!startPos || !goalPos) {
+            alert("請先設定起點與終點！");
+            return;
+        }
+
+        // 每次開始Q-learning前，清除舊的高亮與結果
+        clearHighlight();
+        document.getElementById('resultContainer').innerHTML = '';
+
+        const data = {
+            gridSize: gridSize,
+            startPos: startPos,
+            goalPos: goalPos,
+            obstacles: obstaclePositions
+        };
+
+        document.getElementById('gridData').value = JSON.stringify(data);
+
+        fetch('/train', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        })
+        .then(response => response.json())
+        .then(result => {
+            showTrainingResult(result);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+    }
+
+    // 顯示 Q-Learning 結果
+    function showTrainingResult(result) {
+        const container = document.getElementById('resultContainer');
+        container.innerHTML = ''; // 先清空(以防萬一)
+
+        const { policy, qValues, path, reachable } = result;
+
+        // === 1) 生成 Policy Table (只顯示箭頭) ===
+        let policyTableHtml = "<h2>最佳策略 (箭頭顯示)</h2>";
+        policyTableHtml += "<table><thead><tr>";
+        for (let c = 0; c < gridSize; c++) {
+            policyTableHtml += `<th>Col ${c}</th>`;
+        }
+        policyTableHtml += "</tr></thead><tbody>";
+
+        let currentIndex = 1;
+        for (let r = 0; r < gridSize; r++) {
+            policyTableHtml += "<tr>";
+            for (let c = 0; c < gridSize; c++) {
+                const idx = currentIndex++;
+                let cellContent = "N/A";
+                // 如果存在 policy[idx]，顯示方向箭頭
+                if (policy.hasOwnProperty(idx)) {
+                    const direction = policy[idx];
+                    if (direction === 'U') cellContent = '↑';
+                    else if (direction === 'D') cellContent = '↓';
+                    else if (direction === 'L') cellContent = '←';
+                    else if (direction === 'R') cellContent = '→';
+                }
+                policyTableHtml += `<td>${cellContent}</td>`;
+            }
+            policyTableHtml += "</tr>";
+        }
+        policyTableHtml += "</tbody></table>";
+
+        // === 2) 生成 Q-value Table (只顯示 Q-value) ===
+        let qValueTableHtml = "<h2>Q-value</h2>";
+        qValueTableHtml += "<table><thead><tr>";
+        for (let c = 0; c < gridSize; c++) {
+            qValueTableHtml += `<th>Col ${c}</th>`;
+        }
+        qValueTableHtml += "</tr></thead><tbody>";
+
+        currentIndex = 1; // 重置
+        for (let r = 0; r < gridSize; r++) {
+            qValueTableHtml += "<tr>";
+            for (let c = 0; c < gridSize; c++) {
+                const idx = currentIndex++;
+                let valStr = "N/A";
+                if (qValues.hasOwnProperty(idx)) {
+                    valStr = qValues[idx].toFixed(2);
+                }
+                qValueTableHtml += `<td>${valStr}</td>`;
+            }
+            qValueTableHtml += "</tr>";
+        }
+        qValueTableHtml += "</tbody></table>";
+
+        // 放到 resultContainer
+        container.innerHTML = policyTableHtml + qValueTableHtml;
+
+        // === 3) 若無法到達終點，顯示錯誤訊息；否則顯示路徑動畫 ===
+        if (!reachable) {
+            container.innerHTML += "<p style='color:red; font-weight:bold;'>無法到達終點</p>";
+            return;  // 不執行路徑高亮
+        }
+
+        // 可以到達終點 -> 顯示路徑動畫
+        const gridContainer = document.getElementById('gridContainer');
+        const cells = gridContainer.querySelectorAll('.grid-item');
+
+        let step = 0;
+        const pathInterval = setInterval(() => {
+            if (step >= path.length) {
+                clearInterval(pathInterval);
+                return;
+            }
+            const idx = path[step];
+            const targetCell = Array.from(cells).find(c => parseInt(c.dataset.index) === idx);
+            if (targetCell) {
+                targetCell.classList.add('highlight');
+            }
+            step++;
+        }, 600); // 0.6 秒更新一次，可依需求調整
+    }
+</script>
+</body>
+</html>
